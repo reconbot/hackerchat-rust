@@ -8,6 +8,7 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0.69"
 async-channel = "1.8.0"
+futures = "0.3.26"
 serde = { version = "1.0.152", features = ["std", "derive"] }
 serde_json = "1.0.93"
 socket2 = "0.4.7"
