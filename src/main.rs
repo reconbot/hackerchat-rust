@@ -1,37 +1,18 @@
+mod ux;
+mod protocol;
+
 use futures::{try_join, FutureExt, future::try_join_all};
+use protocol::{ReceivedMessage, SendingMessage};
 use std::{net::{SocketAddr, Ipv4Addr}, sync::Arc};
 use tokio::net::{UdpSocket}; //UdpFramed
 use anyhow::{Context, Result};
 use socket2::{Socket, Domain, Type, Protocol};
-use serde::{Deserialize, Serialize};
-use std::time::{SystemTime, UNIX_EPOCH};
 use async_channel::{Receiver, Sender};
-use chrono::{DateTime, Utc, NaiveDateTime};
-
-fn unix_timestamp_to_human_readable(timestamp_millis: u128) -> String {
-    let datetime = DateTime::<Utc>::from_utc(
-        NaiveDateTime::from_timestamp_millis(timestamp_millis.try_into().unwrap()).unwrap(),
-        Utc,
-    );
-    datetime.format("%Y-%m-%d %H:%M:%S").to_string()
-}
 
 // https://stackoverflow.com/a/35697810/339 claims 508 bytes is the only safe size for the internet
 // we're not going on the internet so it's the MTU of our ethernet or maybe the max ip packet size minus some overhead so maybe 65515 bytes? People there seem to think if IP fragments our packet we're in trouble but I don't think so. Ethernet MTU is 1500 bytes? I'm going with 64kb because it's all the memory I'll ever need.
 const UDP_MAX_PACKET_SIZE: usize = 64 * 1024;
 
-#[derive(Debug)]
-struct ReceivedMessage {
-    text: String,
-    timestamp: u128,
-    ip: String,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-struct SendingMessage {
-    text: String,
-    timestamp: u128,
-}
 
 async fn decoder(rx: Receiver<(SocketAddr, Vec<u8>)>, tx: Sender<ReceivedMessage>) -> Result<()>{
     tokio::spawn(async move {
@@ -78,32 +59,6 @@ async fn encoder(rx: Receiver<SendingMessage>, tx: Sender<Vec<u8>>) -> Result<()
             }
         }
     });
-    Ok(())
-}
-
-async fn ux(rx: Receiver<ReceivedMessage>, tx: Sender<SendingMessage>) -> Result<()> {
-    let input = tokio::task::spawn_blocking(move || {
-        let stdin = std::io::stdin();
-        loop {
-            let mut text = String::new();
-            stdin.read_line(&mut text).unwrap();
-            let text = text.trim_end();
-            if text.is_empty() {
-                continue;
-            }
-            let now = SystemTime::now();
-            let timestamp = now.duration_since(UNIX_EPOCH).unwrap().as_millis();
-            tx.send_blocking(SendingMessage { text: text.into(), timestamp }).with_context(|| "send failed why?").unwrap();
-        };
-    });
-
-    let output = tokio::spawn(async move {
-        loop {
-            let message = rx.recv().await.unwrap();
-            println!("{} {}: {}", unix_timestamp_to_human_readable(message.timestamp), message.ip, message.text);
-        };
-    });
-    try_join!(input, output)?;
     Ok(())
 }
 
@@ -175,7 +130,7 @@ async fn main() -> Result<()> {
         work.push(encoder(ux_out_rx.clone(), network_out_tx.clone()).boxed());
     }
     work.push((network(network_out_rx, network_in_tx)).boxed());
-    work.push(ux(ux_in_rx, ux_out_tx.clone()).boxed());
+    work.push(ux::ux(ux_in_rx, ux_out_tx.clone()).boxed());
 
     try_join_all(work).await?;
     Ok(())

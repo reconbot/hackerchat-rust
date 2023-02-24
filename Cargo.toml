@@ -13,5 +13,6 @@ futures = "0.3.26"
 serde = { version = "1.0.152", features = ["std", "derive"] }
 serde_json = "1.0.93"
 socket2 = "0.4.7"
+termion = "2.0.1"
 textwrap = "0.16.0"
 tokio = { version = "1.25.0", features = ["full"]}
