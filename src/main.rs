@@ -1,13 +1,11 @@
+use futures::{stream::FuturesUnordered, StreamExt, try_join, FutureExt, future::try_join_all};
 use std::{net::{SocketAddr, Ipv4Addr}, sync::Arc};
 use tokio::net::{UdpSocket}; //UdpFramed
 use anyhow::{Context, Result};
-// use tokio::time::sleep;
-// use std::time::Duration;
 use socket2::{Socket, Domain, Type, Protocol};
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 use async_channel::{Receiver, Sender};
-use futures::try_join;
 
 // https://stackoverflow.com/a/35697810/339 claims 508 bytes is the only safe size for the internet
 // we're not going on the internet so it's the MTU of our ethernet or maybe the max ip packet size minus some overhead so maybe 65515 bytes? People there seem to think if IP fragments our packet we're in trouble but I don't think so. Ethernet MTU is 1500 bytes? I'm going with 64kb because it's all the memory I'll ever need.
@@ -66,7 +64,10 @@ async fn encoder(rx: Receiver<SendingMessage>, tx: Sender<Vec<u8>>) -> Result<()
     Ok(())
 }
 
-async fn ux(rx: Receiver<(ReceivedMessage)>, tx: Sender<SendingMessage>) -> Result<()> {
+/*
+    TODO: strip trailing newline
+ */
+async fn ux(rx: Receiver<ReceivedMessage>, tx: Sender<SendingMessage>) -> Result<()> {
     let input = tokio::task::spawn_blocking(move || {
         let stdin = std::io::stdin();
         loop {
@@ -152,11 +153,15 @@ async fn main() -> Result<()> {
     let (ux_out_tx, ux_out_rx) = async_channel::bounded::<SendingMessage>(1);
     let (ux_in_tx, ux_in_rx) = async_channel::bounded::<ReceivedMessage>(1);
 
-    try_join!(
-        network(network_out_rx, network_in_tx),
-        decoder(network_in_rx, ux_in_tx),
-        encoder(ux_out_rx, network_out_tx),
-        ux(ux_in_rx, ux_out_tx.clone()),
-    )?;
+    let mut work = vec![];
+
+    for _ in 1..num_procs.into() {
+        work.push(decoder(network_in_rx.clone(), ux_in_tx.clone()).boxed());
+        work.push(encoder(ux_out_rx.clone(), network_out_tx.clone()).boxed());
+    }
+    work.push((network(network_out_rx, network_in_tx)).boxed());
+    work.push(ux(ux_in_rx, ux_out_tx.clone()).boxed());
+
+    try_join_all(work).await?;
     Ok(())
 }
