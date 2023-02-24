@@ -1,4 +1,4 @@
-use futures::{stream::FuturesUnordered, StreamExt, try_join, FutureExt, future::try_join_all};
+use futures::{try_join, FutureExt, future::try_join_all};
 use std::{net::{SocketAddr, Ipv4Addr}, sync::Arc};
 use tokio::net::{UdpSocket}; //UdpFramed
 use anyhow::{Context, Result};
@@ -6,6 +6,15 @@ use socket2::{Socket, Domain, Type, Protocol};
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 use async_channel::{Receiver, Sender};
+use chrono::{DateTime, Utc, NaiveDateTime};
+
+fn unix_timestamp_to_human_readable(timestamp_millis: u128) -> String {
+    let datetime = DateTime::<Utc>::from_utc(
+        NaiveDateTime::from_timestamp_millis(timestamp_millis.try_into().unwrap()).unwrap(),
+        Utc,
+    );
+    datetime.format("%Y-%m-%d %H:%M:%S").to_string()
+}
 
 // https://stackoverflow.com/a/35697810/339 claims 508 bytes is the only safe size for the internet
 // we're not going on the internet so it's the MTU of our ethernet or maybe the max ip packet size minus some overhead so maybe 65515 bytes? People there seem to think if IP fragments our packet we're in trouble but I don't think so. Ethernet MTU is 1500 bytes? I'm going with 64kb because it's all the memory I'll ever need.
@@ -51,41 +60,47 @@ async fn encoder(rx: Receiver<SendingMessage>, tx: Sender<Vec<u8>>) -> Result<()
     tokio::spawn(async move {
         loop {
             let message = rx.recv().await.unwrap();
-            let data = match serde_json::to_string(&message) {
-                Ok(data) => data.as_bytes().to_vec(),
-                Err(e) => {
-                    println!("Error encoding JSON {}", e);
-                    continue;
-                }
-            };
-            tx.send(data).await.with_context(||"error sending encoded data").unwrap();
+            let wrapped = textwrap::fill(&message.text, UDP_MAX_PACKET_SIZE - 1024);
+            let parts = wrapped.split("\n");
+            for part in parts {
+                let part_message = SendingMessage {
+                    text: part.to_string(),
+                    ..message
+                };
+                let data = match serde_json::to_string(&part_message) {
+                    Ok(data) => data.as_bytes().to_vec(),
+                    Err(e) => {
+                        println!("Error encoding JSON {}", e);
+                        continue;
+                    }
+                };
+                tx.send(data).await.with_context(||"error sending encoded data").unwrap();
+            }
         }
     });
     Ok(())
 }
 
-/*
-    TODO: strip trailing newline
- */
 async fn ux(rx: Receiver<ReceivedMessage>, tx: Sender<SendingMessage>) -> Result<()> {
     let input = tokio::task::spawn_blocking(move || {
         let stdin = std::io::stdin();
         loop {
             let mut text = String::new();
             stdin.read_line(&mut text).unwrap();
+            let text = text.trim_end();
             if text.is_empty() {
                 continue;
             }
             let now = SystemTime::now();
             let timestamp = now.duration_since(UNIX_EPOCH).unwrap().as_millis();
-            tx.send_blocking(SendingMessage { text, timestamp }).with_context(|| "send failed why?").unwrap();
+            tx.send_blocking(SendingMessage { text: text.into(), timestamp }).with_context(|| "send failed why?").unwrap();
         };
     });
 
     let output = tokio::spawn(async move {
         loop {
             let message = rx.recv().await.unwrap();
-            println!("Received Message {}", message.text);
+            println!("{} {}: {}", unix_timestamp_to_human_readable(message.timestamp), message.ip, message.text);
         };
     });
     try_join!(input, output)?;
@@ -123,7 +138,7 @@ async fn network(rx: Receiver<Vec<u8>>, tx: Sender<(SocketAddr, Vec<u8>)>) -> Re
             let (size, src) = receiver.recv_from(&mut buf).await.unwrap();
             // println!("received packet! {:?}", buf[..size].to_vec());
             if size > UDP_MAX_PACKET_SIZE {
-                println!("ignoring a packet that's too large");
+                eprintln!("ignoring a packet that's too large");
                 continue;
             }
             let packet = buf[..size].to_vec();
@@ -137,7 +152,7 @@ async fn network(rx: Receiver<Vec<u8>>, tx: Sender<(SocketAddr, Vec<u8>)>) -> Re
         loop {
             let packet = rx.recv().await.with_context(||"receiving a packet to send").unwrap();
             sender.send_to(&packet, &multicast_addr).await.unwrap();
-            println!("sent! {:?}", std::str::from_utf8(&packet));
+            // println!("sent! {:?}", std::str::from_utf8(&packet));
         }
     });
     try_join!(input, output)?;
